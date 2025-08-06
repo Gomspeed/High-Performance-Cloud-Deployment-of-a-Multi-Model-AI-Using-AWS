@@ -1,8 +1,10 @@
+# =========================================
+# File: app.py
+# =========================================
 #!/usr/bin/env python3
 import os
-
 import aws_cdk as cdk
-from langflow_ui.langflow_ui_stack import LangflowUiStack
+from chainlit_ui.chainlit_ui_stack import ChainlitUiStack
 
 app = cdk.App()
 
@@ -12,10 +14,10 @@ synth = cdk.DefaultStackSynthesizer(
     bucket_prefix=""
 )
 
-LangflowUiStack(app, "LangflowUiStack",
+ChainlitUiStack(app, "ChainlitUiStack",
     synthesizer=synth,
-    # env=cdk.Environment(account=os.getenv("CDK_DEFAULT_ACCOUNT"),
-    #                     region=os.getenv("CDK_DEFAULT_REGION"))
+    env=cdk.Environment(account=os.getenv("CDK_DEFAULT_ACCOUNT"),
+                        region=os.getenv("CDK_DEFAULT_REGION"))
 )
 
 app.synth()
