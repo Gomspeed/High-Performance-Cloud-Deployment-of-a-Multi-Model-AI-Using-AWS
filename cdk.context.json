@@ -9,5 +9,9 @@
   ],
   "acknowledged-issue-numbers": [
     34892
-  ]
+  ],
+  "hosted-zone:account=747297410725:domainName=naatsgroup.com:region=us-east-1": {
+    "Id": "/hostedzone/Z045056010U4HZHFZ9AEN",
+    "Name": "naatsgroup.com."
+  }
 }
