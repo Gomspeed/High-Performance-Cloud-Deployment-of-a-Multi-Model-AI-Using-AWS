@@ -8,14 +8,21 @@ from aws_cdk import (
     aws_secretsmanager as secretsmanager,
     aws_wafv2 as wafv2,
     aws_cloudwatch as cloudwatch,
+    aws_cloudwatch_actions as cw_actions,
     aws_certificatemanager as acm,
     aws_elasticloadbalancingv2 as elbv2,
     aws_route53 as route53,
     aws_route53_targets as targets,
     aws_autoscaling as autoscaling,
     aws_applicationautoscaling as appscaling,
+    aws_sns as sns,
+    aws_sns_subscriptions as subs,
+    aws_iam as iam,
 )
 from constructs import Construct
+
+
+NOTIFY_EMAIL = "Gomezoluwatobi@gmail.com"  # you can remove or change later
 
 
 class ChainlitUiStack(Stack):
@@ -33,9 +40,7 @@ class ChainlitUiStack(Stack):
             vpc=vpc,
             instance_type=ec2.InstanceType("t3.small"),
             machine_image=ecs.EcsOptimizedImage.amazon_linux2(),
-            desired_capacity=2,
-            min_capacity=1,
-            max_capacity=4,
+            desired_capacity=2, min_capacity=1, max_capacity=4,
         )
 
         cp = ecs.AsgCapacityProvider(
@@ -50,16 +55,17 @@ class ChainlitUiStack(Stack):
             ecs.CapacityProviderStrategy(capacity_provider=cp.capacity_provider_name, weight=1)
         ])
 
-        # 3) S3 bucket (read-only to tasks)
+        # 3) (Optional) S3 bucket your app can read (keeping from previous stack)
         bucket = s3.Bucket(self, "KnowledgeBucket", removal_policy=RemovalPolicy.DESTROY, auto_delete_objects=True)
 
-        # 4) Secret (OPENAI key)
+        # 4) Secrets (OpenAI + Google Gemini)
         openai_secret = secretsmanager.Secret.from_secret_name_v2(self, "OpenAIKeySecret", "chainlit/openai-api-key")
+        google_secret = secretsmanager.Secret.from_secret_name_v2(self, "GoogleKeySecret", "chatui/google-api-key")
 
-        # 5) App image
-        ui_image = ecs.ContainerImage.from_registry("public.ecr.aws/k8o4e3d3/chatbot-ui:latest")
+        # 5) Lobe Chat image
+        ui_image = ecs.ContainerImage.from_registry("lobehub/lobe-chat:latest")
 
-        # 6) DNS zone + 7) ACM cert
+        # 6) Hosted zone + 7) ACM cert
         hosted_zone = route53.HostedZone.from_lookup(self, "HostedZone", domain_name="naatsgroup.com")
         certificate = acm.Certificate(
             self, "AlbCert",
@@ -69,7 +75,7 @@ class ChainlitUiStack(Stack):
 
         # 8) ECS Service behind ALB (HTTPS + redirect), logs + exec
         service = ecs_patterns.ApplicationLoadBalancedEc2Service(
-            self, "ChatbotUiService",
+            self, "ChatUiService",
             cluster=cluster,
             desired_count=2,
             memory_limit_mib=1024,
@@ -80,17 +86,18 @@ class ChainlitUiStack(Stack):
             enable_execute_command=True,
             task_image_options=ecs_patterns.ApplicationLoadBalancedTaskImageOptions(
                 image=ui_image,
-                container_port=3000,
+                container_port=3210,  # Lobe Chat default
                 environment={
-                    "AWS_REGION": self.region,
-                    "KNOWLEDGE_BUCKET": bucket.bucket_name,
-                    "PORT": "3000",       # app should bind to 3000
-                    "HOST": "0.0.0.0",    # listen on all interfaces
+                    "NEXT_PUBLIC_ENABLE_AUTH": "false",   # quick start (turn on auth later if you want)
+                    # You can also set defaults:
+                    # "NEXT_PUBLIC_DEFAULT_PROVIDER": "openai",
+                    # "NEXT_PUBLIC_DEFAULT_MODEL": "gpt-4o-mini",
                 },
                 secrets={
-                    "OPENAI_API_KEY": ecs.Secret.from_secrets_manager(openai_secret, field="OPENAI_API_KEY")
+                    "OPENAI_API_KEY": ecs.Secret.from_secrets_manager(openai_secret, field="OPENAI_API_KEY"),
+                    "GOOGLE_API_KEY": ecs.Secret.from_secrets_manager(google_secret, field="GOOGLE_API_KEY"),
                 },
-                log_driver=ecs.LogDrivers.aws_logs(stream_prefix="chatbotui"),
+                log_driver=ecs.LogDrivers.aws_logs(stream_prefix="lobe-chat"),
             ),
             health_check_grace_period=Duration.seconds(120),
         )
@@ -98,23 +105,20 @@ class ChainlitUiStack(Stack):
         # 🔒 Security groups for EC2/bridge mode (dynamic host ports)
         alb_sg = service.load_balancer.connections.security_groups[0]
         asg_sg = asg.connections.security_groups[0]
-
-        # Ingress: ALB -> instances on ephemeral host ports
         asg_sg.add_ingress_rule(
             peer=alb_sg,
             connection=ec2.Port.tcp_range(32768, 65535),
             description="Allow ALB to reach ECS tasks on dynamic host ports (bridge mode)",
         )
-        # Egress: ALB -> instances on the same ports (defensive; helpful on restrictive setups)
         alb_sg.add_egress_rule(
             peer=asg_sg,
             connection=ec2.Port.tcp_range(32768, 65535),
             description="Allow ALB egress to ECS instances on dynamic host ports",
         )
 
-        # Health checks for the app
+        # Health checks
         service.target_group.configure_health_check(
-            path="/",                         # change if your app has a /health endpoint
+            path="/",
             port="traffic-port",
             healthy_http_codes="200-399",
             interval=Duration.seconds(30),
@@ -122,12 +126,10 @@ class ChainlitUiStack(Stack):
             healthy_threshold_count=2,
             unhealthy_threshold_count=5,
         )
-        # Faster deregistration to shorten updates/rollbacks
         service.target_group.set_attribute("deregistration_delay.timeout_seconds", "30")
-        # Reduce false 504s on slow first responses
         service.load_balancer.set_attribute("idle_timeout.timeout_seconds", "120")
 
-        # S3 read permission for tasks
+        # Task can read from the bucket (if you use it)
         bucket.grant_read(service.task_definition.task_role)
 
         # 9) Task autoscaling (1..6) — CPU + request-rate
@@ -212,30 +214,137 @@ class ChainlitUiStack(Stack):
                                    resource_arn=service.load_balancer.load_balancer_arn,
                                    web_acl_arn=web_acl.attr_arn)
 
-        # 11) Dashboard
-        dash = cloudwatch.Dashboard(self, "Dashboard", dashboard_name="ChainlitEcsDashboard")
-        dash.add_widgets(
-            cloudwatch.GraphWidget(title="ECS CPU Utilization (%)",
-                                   left=[service.service.metric_cpu_utilization(statistic="Average",
-                                                                                period=Duration.minutes(1))]),
-            cloudwatch.GraphWidget(title="ALB Request Count",
-                                   left=[service.load_balancer.metric_request_count(statistic="Sum",
-                                                                                    period=Duration.minutes(1))]),
-            cloudwatch.GraphWidget(title="ALB Healthy Hosts",
-                                   left=[service.target_group.metric_healthy_host_count(statistic="Average",
-                                                                                        period=Duration.minutes(1))]),
+        # ===== Observability Pack (no canary) =====
+
+        # A) ALB access logs → S3 (30-day retention) with proper policy for us-east-1
+        alb_logs_bucket = s3.Bucket(
+            self, "AlbAccessLogs",
+            object_ownership=s3.ObjectOwnership.OBJECT_WRITER,   # required for ALB log delivery ACL
+            lifecycle_rules=[s3.LifecycleRule(enabled=True, expiration=Duration.days(30))],
+            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
+            enforce_ssl=True,
         )
+        elb_log_account = "127311923021"  # us-east-1 log delivery account
+        alb_logs_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="AWSLogDeliveryWrite",
+                effect=iam.Effect.ALLOW,
+                principals=[iam.ArnPrincipal(f"arn:aws:iam::{elb_log_account}:root")],
+                actions=["s3:PutObject"],
+                resources=[f"{alb_logs_bucket.bucket_arn}/alb-logs/AWSLogs/{self.account}/*"],
+                conditions={"StringEquals": {"s3:x-amz-acl": "bucket-owner-full-control"}},
+            )
+        )
+        alb_logs_bucket.add_to_resource_policy(
+            iam.PolicyStatement(
+                sid="AWSLogDeliveryCheck",
+                effect=iam.Effect.ALLOW,
+                principals=[iam.ArnPrincipal(f"arn:aws:iam::{elb_log_account}:root")],
+                actions=["s3:GetBucketAcl"],
+                resources=[alb_logs_bucket.bucket_arn],
+            )
+        )
+        service.load_balancer.set_attribute("access_logs.s3.enabled", "true")
+        service.load_balancer.set_attribute("access_logs.s3.bucket", alb_logs_bucket.bucket_name)
+        service.load_balancer.set_attribute("access_logs.s3.prefix", "alb-logs")
+        if alb_logs_bucket.policy:
+            service.load_balancer.node.add_dependency(alb_logs_bucket.policy)
+
+        # B) SNS topic for alarms (+ permanent email subscription)
+        alerts_topic = sns.Topic(self, "AlertsTopic")
+        if NOTIFY_EMAIL:
+            alerts_topic.add_subscription(subs.EmailSubscription(NOTIFY_EMAIL))
+
+        # C) Metrics for alarms & dashboard
+        tg = service.target_group
+        lb = service.load_balancer
+
+        p95_latency = tg.metric_target_response_time(statistic="p95", period=Duration.minutes(1))
+        unhealthy_hosts = tg.metric_unhealthy_host_count(statistic="Average", period=Duration.minutes(1))
+        http_target_5xx = cloudwatch.Metric(
+            namespace="AWS/ApplicationELB", metric_name="HTTPCode_Target_5XX_Count",
+            dimensions_map={"TargetGroup": tg.target_group_full_name, "LoadBalancer": lb.load_balancer_full_name},
+            statistic="Sum", period=Duration.minutes(1)
+        )
+        http_elb_5xx = cloudwatch.Metric(
+            namespace="AWS/ApplicationELB", metric_name="HTTPCode_ELB_5XX_Count",
+            dimensions_map={"LoadBalancer": lb.load_balancer_full_name},
+            statistic="Sum", period=Duration.minutes(1)
+        )
+
+        # D) Alarms → SNS
+        cloudwatch.Alarm(
+            self, "HighP95Latency",
+            metric=p95_latency, threshold=1.0,
+            evaluation_periods=3, datapoints_to_alarm=2,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            alarm_description="p95 target response time > 1s",
+        ).add_alarm_action(cw_actions.SnsAction(alerts_topic))
+
+        cloudwatch.Alarm(
+            self, "UnhealthyHostsAlarm",
+            metric=unhealthy_hosts, threshold=0.5,
+            evaluation_periods=2, datapoints_to_alarm=1,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            alarm_description="Any target becomes unhealthy",
+        ).add_alarm_action(cw_actions.SnsAction(alerts_topic))
+
+        cloudwatch.Alarm(
+            self, "Target5XXAlarm",
+            metric=http_target_5xx, threshold=5,
+            evaluation_periods=3, datapoints_to_alarm=2,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            alarm_description="Target group returning 5xx errors",
+        ).add_alarm_action(cw_actions.SnsAction(alerts_topic))
+
+        cloudwatch.Alarm(
+            self, "Elb5XXAlarm",
+            metric=http_elb_5xx, threshold=5,
+            evaluation_periods=3, datapoints_to_alarm=2,
+            comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+            alarm_description="ALB (frontend) returning 5xx errors",
+        ).add_alarm_action(cw_actions.SnsAction(alerts_topic))
+
+        # E) Dashboard
+        dashboard = cloudwatch.Dashboard(self, "Dashboard", dashboard_name="ChainlitEcsDashboard")
+        dashboard.add_widgets(
+            cloudwatch.GraphWidget(
+                title="ECS CPU Utilization (%)",
+                left=[service.service.metric_cpu_utilization(statistic="Average", period=Duration.minutes(1))]
+            ),
+            cloudwatch.GraphWidget(
+                title="ALB Request Count (Sum/min)",
+                left=[lb.metric_request_count(statistic="Sum", period=Duration.minutes(1))]
+            ),
+            cloudwatch.GraphWidget(
+                title="ALB Healthy (L) vs Unhealthy (R)",
+                left=[tg.metric_healthy_host_count(statistic="Average", period=Duration.minutes(1))],
+                right=[unhealthy_hosts],
+            ),
+            cloudwatch.GraphWidget(
+                title="Target Response Time (p50 & p95)",
+                left=[
+                    tg.metric_target_response_time(statistic="p50", period=Duration.minutes(1)),
+                    p95_latency
+                ]
+            ),
+            cloudwatch.GraphWidget(
+                title="HTTP 5xx (Target vs ELB)",
+                left=[http_target_5xx],
+                right=[http_elb_5xx],
+            ),
+        )
+
+        # ===== /Observability Pack =====
 
         # 12) DNS: ridwan.naatsgroup.com → ALB
         route53.ARecord(
             self, "RidwanAliasRecord",
             zone=hosted_zone,
             record_name="ridwan",
-            target=route53.RecordTarget.from_alias(
-                targets.LoadBalancerTarget(service.load_balancer)
-            ),
+            target=route53.RecordTarget.from_alias(targets.LoadBalancerTarget(service.load_balancer)),
         )
 
         # 13) Outputs
         CfnOutput(self, "LoadBalancerDNS", value=service.load_balancer.load_balancer_dns_name, description="ALB DNS")
-        CfnOutput(self, "KnowledgeBucketName", value=bucket.bucket_name, description="S3 bucket")
+        CfnOutput(self, "AlertsSnsTopicArn", value=alerts_topic.topic_arn, description="Alerts SNS Topic")
