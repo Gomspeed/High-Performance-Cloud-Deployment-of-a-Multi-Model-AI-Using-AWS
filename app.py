@@ -1,10 +1,7 @@
-# =========================================
-# File: app.py
-# =========================================
 #!/usr/bin/env python3
 import os
 import aws_cdk as cdk
-from chainlit_ui.chainlit_ui_stack import ChainlitUiStack
+from multi_modal_ai.multi_modal_ai_stack import MultiModalAiStack
 
 app = cdk.App()
 
@@ -14,10 +11,13 @@ synth = cdk.DefaultStackSynthesizer(
     bucket_prefix=""
 )
 
-ChainlitUiStack(app, "ChainlitUiStack",
+MultiModalAiStack(
+    app, "MultiModalAiStack",
     synthesizer=synth,
-    env=cdk.Environment(account=os.getenv("CDK_DEFAULT_ACCOUNT"),
-                        region=os.getenv("CDK_DEFAULT_REGION"))
+    env=cdk.Environment(
+        account=os.getenv("CDK_DEFAULT_ACCOUNT"),
+        region=os.getenv("CDK_DEFAULT_REGION"),
+    ),
 )
 
 app.synth()
