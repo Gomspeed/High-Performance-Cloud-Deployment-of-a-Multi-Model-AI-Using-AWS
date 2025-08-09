@@ -22,7 +22,7 @@ from aws_cdk import (
 from constructs import Construct
 
 
-NOTIFY_EMAIL = "Gomezoluwatobi@gmail.com"  # you can remove or change later
+NOTIFY_EMAIL = "*****@gmail.com"  # you can remove or change later
 
 
 class ChainlitUiStack(Stack):
@@ -69,7 +69,7 @@ class ChainlitUiStack(Stack):
         hosted_zone = route53.HostedZone.from_lookup(self, "HostedZone", domain_name="naatsgroup.com")
         certificate = acm.Certificate(
             self, "AlbCert",
-            domain_name="ridwan.naatsgroup.com",
+            domain_name="******.com",
             validation=acm.CertificateValidation.from_dns(hosted_zone),
         )
 
@@ -337,11 +337,11 @@ class ChainlitUiStack(Stack):
 
         # ===== /Observability Pack =====
 
-        # 12) DNS: ridwan.naatsgroup.com → ALB
+        # 12) DNS: *****.com → ALB
         route53.ARecord(
-            self, "RidwanAliasRecord",
+            self, "****AliasRecord",
             zone=hosted_zone,
-            record_name="ridwan",
+            record_name="****",
             target=route53.RecordTarget.from_alias(targets.LoadBalancerTarget(service.load_balancer)),
         )
 
