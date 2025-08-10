@@ -59,8 +59,8 @@ class MultiModalAiStack(Stack):
         bucket = s3.Bucket(self, "KnowledgeBucket", removal_policy=RemovalPolicy.DESTROY, auto_delete_objects=True)
 
         # 4) Secrets (OpenAI + Google Gemini)
-        openai_secret = secretsmanager.Secret.from_secret_name_v2(self, "OpenAIKeySecret", "chainlit/openai-api-key")
-        google_secret = secretsmanager.Secret.from_secret_name_v2(self, "GoogleKeySecret", "chatui/google-api-key")
+        openai_secret = secretsmanager.Secret.from_secret_name_v2(self, "OpenAIKeySecret", "multimodalai/openai-api-key")
+        google_secret = secretsmanager.Secret.from_secret_name_v2(self, "GoogleKeySecret", "multimodalai/google-api-key")
 
         # 5) Lobe Chat image
         ui_image = ecs.ContainerImage.from_registry("lobehub/lobe-chat:latest")
